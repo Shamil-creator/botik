@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Dict, Iterable, List
 from docx import Document
 
 from schedule_bot.services.storage import SessionData, Storage
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -19,15 +22,20 @@ class ParsedRange:
 
 def ensure_sessions_loaded(storage: Storage, session_dir: Path | None = None) -> None:
     if storage.has_sessions():
+        logger.debug("Sessions already loaded, skipping import")
         return
 
     directory = session_dir or Path(__file__).resolve().parents[1] / "сессия"
     if not directory.exists():
+        logger.warning("Session directory not found: %s", directory)
         return
 
     sessions = _collect_sessions(directory)
     if sessions:
         storage.replace_sessions(sessions.values())
+        logger.info("Session data imported count=%d", len(sessions))
+    else:
+        logger.warning("No session data parsed from directory %s", directory)
 
 
 def format_session_message(group_name: str, session: SessionData) -> str:
@@ -51,6 +59,7 @@ def _collect_sessions(directory: Path) -> Dict[str, SessionData]:
 
 def _parse_doc(path: Path) -> Iterable[SessionData]:
     document = Document(path)
+    logger.debug("Parsing session document %s", path)
     for table in document.tables:
         if not table.rows:
             continue
@@ -75,6 +84,7 @@ def _parse_doc(path: Path) -> Iterable[SessionData]:
             exam = _parse_range(cells[exam_idx])
 
             for group in groups:
+                logger.debug("Session entry found group=%s file=%s", group, path.name)
                 yield SessionData(
                     group_name=group,
                     credit_start=credit.start,

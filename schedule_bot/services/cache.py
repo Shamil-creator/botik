@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
 
 from schedule_bot.services.fetcher import ScheduleFile
+
+logger = logging.getLogger(__name__)
 
 
 class ScheduleCache:
@@ -39,6 +42,7 @@ class ScheduleCache:
         self._file_list_cache = (datetime.now(), files)
         if changed:
             self._prune_storage({file.url for file in files})
+            logger.info("File list updated count=%d", len(files))
         return changed
 
     def get_file_list_signature(self) -> Optional[Tuple[Tuple[str, str], ...]]:
@@ -57,10 +61,12 @@ class ScheduleCache:
     def load_file_from_disk(self, file_url: str) -> Optional[bytes]:
         path = self._file_path(file_url)
         if not path.exists():
+            logger.debug("Cache miss on disk for %s", file_url)
             return None
         try:
             return path.read_bytes()
         except OSError:
+            logger.exception("Failed to read cached file %s", path)
             return None
 
     def _persist_file(self, file_url: str, content: bytes) -> None:
@@ -68,7 +74,7 @@ class ScheduleCache:
         try:
             path.write_bytes(content)
         except OSError:
-            pass
+            logger.exception("Failed to persist cache file %s", path)
 
     def _prune_storage(self, active_urls: Set[str]) -> None:
         active_hashes = {self._hash_url(url) for url in active_urls}
@@ -97,6 +103,9 @@ class ScheduleCache:
         self._file_content_cache[file_url] = (datetime.now(), content)
         if persist:
             self._persist_file(file_url, content)
+        logger.debug(
+            "In-memory cache updated for %s persist=%s", file_url, persist
+        )
 
     # ----- Наблюдатели -----
 

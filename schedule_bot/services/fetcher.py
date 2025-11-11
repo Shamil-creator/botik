@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Iterable, List
 from urllib.parse import urljoin
@@ -26,18 +27,30 @@ class ScheduleFetcher:
     ) -> None:
         self._base_url = base_url or DEFAULT_SCHEDULE_URL
         self._timeout = timeout
+        self._logger = logging.getLogger(self.__class__.__name__)
 
     async def list_schedule_files(self) -> List[ScheduleFile]:
+        self._logger.info("Fetching schedule file list from %s", self._base_url)
         html = await self._load_page(self._base_url)
-        return list(self._parse_excel_links(html))
+        files = list(self._parse_excel_links(html))
+        self._logger.info("Discovered %d schedule file(s)", len(files))
+        return files
 
     async def download(self, file: ScheduleFile) -> bytes:
+        self._logger.info("Downloading schedule file title=%s url=%s", file.title, file.url)
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             response = await client.get(file.url)
             response.raise_for_status()
+            self._logger.info(
+                "Downloaded %s with status %s and %d bytes",
+                file.url,
+                response.status_code,
+                len(response.content),
+            )
             return response.content
 
     async def _load_page(self, url: str) -> str:
+        self._logger.debug("Loading HTML page %s", url)
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             response = await client.get(url)
             response.raise_for_status()
@@ -55,4 +68,5 @@ class ScheduleFetcher:
                 continue
             absolute_url = urljoin(self._base_url, href)
             title = anchor.get_text(strip=True) or href.split("/")[-1]
+            self._logger.debug("Found schedule file title=%s url=%s", title, absolute_url)
             yield ScheduleFile(title=title, url=absolute_url)

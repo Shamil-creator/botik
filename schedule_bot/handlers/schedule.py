@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Optional
 
@@ -22,6 +23,7 @@ from schedule_bot.services.ui import build_schedule_keyboard
 
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 @router.message(Command("schedule"))
@@ -31,6 +33,12 @@ async def handle_schedule(message: Message, command: CommandObject) -> None:
         tokens = args.split()
         group_query = tokens[0]
         day_query = " ".join(tokens[1:]) if len(tokens) > 1 else None
+        logger.info(
+            "Schedule request with args chat_id=%s group_query=%s day_query=%s",
+            message.chat.id,
+            group_query,
+            day_query,
+        )
     else:
         stored_group = storage.get_user_group(message.chat.id)
         if not stored_group:
@@ -38,9 +46,15 @@ async def handle_schedule(message: Message, command: CommandObject) -> None:
                 "Укажи группу: /schedule <группа> [день] или сначала "
                 "настрой группу через /start"
             )
+            logger.info("Schedule request without group chat_id=%s", message.chat.id)
             return
         group_query = stored_group
         day_query = None
+        logger.info(
+            "Schedule request using stored group chat_id=%s group=%s",
+            message.chat.id,
+            group_query,
+        )
 
     day = _normalize_day(day_query) if day_query else None
     if day_query and not day:
@@ -48,9 +62,13 @@ async def handle_schedule(message: Message, command: CommandObject) -> None:
             "Не понял день недели. Используй, например: понедельник, вт, "
             "ср, пятница."
         )
+        logger.warning(
+            "Failed to parse day chat_id=%s input=%s", message.chat.id, day_query
+        )
         return
 
     cache.add_watcher(message.chat.id)
+    logger.debug("Watcher added chat_id=%s", message.chat.id)
 
     await send_schedule_for_group(
         message,
@@ -68,17 +86,34 @@ async def _find_group_schedule(
 ) -> Optional[tuple[str, ScheduleFile, str, str]]:
     target = _normalize_group(group_query)
     for file_info in files:
+        logger.debug(
+            "Searching schedule in file title=%s url=%s target=%s",
+            file_info.title,
+            file_info.url,
+            target,
+        )
         content = await _get_schedule_file_bytes(file_info)
         if content is None:
+            logger.warning("Failed to get content for file %s", file_info.url)
             continue
         try:
             sheets = list_sheets(content)
         except Exception:
+            logger.exception(
+                "Failed to list sheets for file title=%s url=%s",
+                file_info.title,
+                file_info.url,
+            )
             continue
         for sheet in sheets:
             try:
                 groups = list_groups(content, sheet)
             except Exception:
+                logger.exception(
+                    "Failed to list groups for sheet=%s file=%s",
+                    sheet,
+                    file_info.url,
+                )
                 continue
             group_name = _match_group(groups, target)
             if not group_name:
@@ -101,6 +136,12 @@ async def _find_group_schedule(
             if not lessons:
                 continue
             formatted = format_lessons(lessons)
+            logger.info(
+                "Schedule found group=%s sheet=%s file=%s",
+                group_name,
+                sheet,
+                file_info.title,
+            )
             return formatted, file_info, sheet, group_name
     return None
 
@@ -137,6 +178,12 @@ async def send_schedule_for_group(
                 f"Не нашёл расписание для группы '{group_query}'. "
                 "Проверь код или попробуй позже."
             )
+        logger.warning(
+            "Schedule not found chat_id=%s group=%s day=%s",
+            message.chat.id,
+            group_query,
+            day,
+        )
         return None
 
     if preview_only:
@@ -158,6 +205,12 @@ async def send_schedule_for_group(
     await message.answer(
         "\n".join(header_lines) + schedule_text,
         reply_markup=reply_markup,
+    )
+    logger.info(
+        "Schedule sent chat_id=%s group=%s day=%s",
+        message.chat.id,
+        group_name,
+        day,
     )
     return match
 
@@ -211,20 +264,24 @@ def _strip_day_heading(schedule_text: str) -> str:
 async def _get_schedule_file_bytes(file_info: ScheduleFile) -> Optional[bytes]:
     cached = cache.get_file_content(file_info.url)
     if cached is not None:
+        logger.debug("Using in-memory cached file %s", file_info.url)
         return cached
 
     stored = cache.load_file_from_disk(file_info.url)
     if stored is not None:
         cache.set_file_content(file_info.url, stored, persist=False)
+        logger.debug("Loaded file from disk cache %s", file_info.url)
         return stored
 
     try:
         raw = await fetcher.download(file_info)
     except httpx.HTTPError:
+        logger.exception("Download failed for %s", file_info.url)
         return None
 
     processed = process_workbook(raw)
     cache.set_file_content(file_info.url, processed)
+    logger.debug("Processed and cached file %s", file_info.url)
     return processed
 
 
@@ -239,11 +296,13 @@ async def _ensure_schedule_files(
             cache.update_file_list(schedule_files)
         except httpx.HTTPError as error:
             await message.answer(f"Не удалось получить список файлов: {error}")
+            logger.exception("Fetching schedule file list failed")
             return None
 
     if not schedule_files:
         if not preview_only:
             await message.answer("На сайте пока нет файлов расписания.")
+        logger.warning("Empty schedule file list obtained")
         return None
 
     return schedule_files

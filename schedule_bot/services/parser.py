@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from io import BytesIO
@@ -7,6 +8,8 @@ from typing import List, Optional
 
 import pandas as pd
 from openpyxl import load_workbook
+
+logger = logging.getLogger(__name__)
 
 
 DAY_COLUMN = "День"
@@ -48,6 +51,12 @@ def extract_group_schedule(
     df = _load_sheet(data, sheet_name)
     if group_name not in df.columns:
         available = ", ".join(df.columns)
+        logger.error(
+            "Group not found in sheet sheet=%s target=%s available=%s",
+            sheet_name,
+            group_name,
+            available,
+        )
         raise ValueError(
             f"Группа '{group_name}' не найдена. Доступные группы: {available}"
         )
@@ -83,6 +92,14 @@ def extract_group_schedule(
 
         description = "\n\n".join(_format_block(block) for block in blocks)
         lessons.append(Lesson(day=day, time=time, description=description))
+    logger.debug(
+        "Extracted lessons count=%d sheet=%s group=%s day_filter=%s week=%s",
+        len(lessons),
+        sheet_name,
+        group_name,
+        day_filter,
+        current_week,
+    )
     return lessons
 
 
@@ -127,6 +144,12 @@ def _load_sheet(data: bytes, sheet_name: str) -> pd.DataFrame:
         if not column.startswith("Unnamed")
     ]
     df = df[columns]
+    logger.debug(
+        "Sheet loaded name=%s columns=%s rows=%d",
+        sheet_name,
+        list(df.columns),
+        len(df),
+    )
     return df
 
 
@@ -136,6 +159,7 @@ def _normalize_schedule(df: pd.DataFrame) -> pd.DataFrame:
         if column in df.columns:
             df[column] = df[column].ffill()
         else:
+            logger.error("Required column missing: %s", column)
             raise ValueError(f"В листе нет обязательного столбца '{column}'")
 
     excluded = {DAY_COLUMN, TIME_COLUMN}
@@ -148,6 +172,11 @@ def _normalize_schedule(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=content_columns, how="all")
     aggregated = df.groupby([DAY_COLUMN, TIME_COLUMN], as_index=False).agg(
         {column: _combine_cells for column in content_columns}
+    )
+    logger.debug(
+        "Normalized schedule rows=%d columns=%s",
+        len(aggregated),
+        list(aggregated.columns),
     )
     return aggregated
 
@@ -347,7 +376,15 @@ def _merge_blocks(content: str) -> List[LessonBlock]:
             return []
         return [LessonBlock(stripped, [])]
 
-    return blocks
+    filtered_blocks = [
+        block for block in blocks if not _is_footer_block(block)
+    ]
+    if len(filtered_blocks) != len(blocks):
+        logger.debug(
+            "Filtered footer blocks count_removed=%d",
+            len(blocks) - len(filtered_blocks),
+        )
+    return filtered_blocks
 
 
 def _format_block(block: LessonBlock) -> str:
@@ -405,4 +442,26 @@ def _matches_week(text: str, current_week: int) -> bool:
     for start, end in all_ranges:
         if start <= current_week <= end:
             return True
+    logger.debug(
+        "Text does not match week current=%d ranges=%s text=%s",
+        current_week,
+        all_ranges,
+        text,
+    )
     return False
+
+
+_FOOTER_KEYWORDS = (
+    "исполнител",
+    "зам. директора",
+    "ведущий специалист",
+    "департамент образования",
+    "депортамента образования",
+)
+
+
+def _is_footer_block(block: LessonBlock) -> bool:
+    text = " ".join([block.title, *block.details]).lower()
+    if re.search(r"_{3,}", text):
+        return True
+    return any(keyword in text for keyword in _FOOTER_KEYWORDS)

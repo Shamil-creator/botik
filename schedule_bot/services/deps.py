@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from schedule_bot.services.cache import ScheduleCache
 from schedule_bot.services.fetcher import ScheduleFetcher
 from schedule_bot.services.storage import Storage
-from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
