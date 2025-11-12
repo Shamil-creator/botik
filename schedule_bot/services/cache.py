@@ -36,6 +36,10 @@ class ScheduleCache:
         # Ограничение на размер кэша в памяти (в байтах)
         self._max_cache_size = int(max_cache_size_mb * 1024 * 1024)
         self._current_cache_size = 0
+        # Кэш для связи группы с файлом и листом (group_name -> (file_url, sheet_name, group_name))
+        # Это значительно ускоряет поиск группы при повторных запросах
+        self._group_location_cache: Dict[str, Tuple[datetime, str, str, str]] = {}
+        self._group_location_ttl = timedelta(minutes=ttl_minutes * 4)  # Кэш расположения группы хранится дольше
 
     # ----- Работа со списком файлов -----
 
@@ -64,6 +68,20 @@ class ScheduleCache:
         self._file_list_cache = (datetime.now(), files)
         if changed:
             self._prune_storage({file.url for file in files})
+            # Очищаем кэш расположения групп, если список файлов изменился
+            # (старые группы могут быть в удаленных файлах)
+            active_urls = {file.url for file in files}
+            groups_to_remove = []
+            for group_name, (_, file_url, _, _) in self._group_location_cache.items():
+                if file_url not in active_urls:
+                    groups_to_remove.append(group_name)
+            for group_name in groups_to_remove:
+                del self._group_location_cache[group_name]
+            if groups_to_remove:
+                logger.debug(
+                    "Cleared group location cache for %d groups (files removed)",
+                    len(groups_to_remove),
+                )
             logger.info("File list updated count=%d", len(files))
         return changed
 
@@ -241,6 +259,45 @@ class ScheduleCache:
         """Сохраняет метаданные файла (листы -> группы)."""
         self._file_metadata_cache[file_url] = (datetime.now(), metadata)
         logger.debug("Metadata cached for %s sheets=%d", file_url, len(metadata))
+
+    # ----- Кэширование расположения группы (группа -> файл, лист) -----
+
+    def get_group_location(self, group_name: str) -> Optional[Tuple[str, str, str]]:
+        """Возвращает расположение группы (file_url, sheet_name, actual_group_name) если оно закэшировано."""
+        normalized = self._normalize_group_name(group_name)
+        if normalized not in self._group_location_cache:
+            return None
+        cached_time, file_url, sheet_name, actual_group_name = self._group_location_cache[normalized]
+        if datetime.now() - cached_time > self._group_location_ttl:
+            del self._group_location_cache[normalized]
+            return None
+        return file_url, sheet_name, actual_group_name
+
+    def set_group_location(
+        self, group_name: str, file_url: str, sheet_name: str, actual_group_name: str
+    ) -> None:
+        """Сохраняет расположение группы (группа -> файл, лист)."""
+        normalized = self._normalize_group_name(group_name)
+        self._group_location_cache[normalized] = (
+            datetime.now(),
+            file_url,
+            sheet_name,
+            actual_group_name,
+        )
+        logger.debug(
+            "Group location cached group=%s file=%s sheet=%s",
+            normalized,
+            file_url,
+            sheet_name,
+        )
+
+    def _normalize_group_name(self, name: str) -> str:
+        """Нормализует имя группы для использования в кэше.
+        Использует ту же логику, что и _normalize_group в schedule.py."""
+        import re
+        # Удаляем все пробелы и преобразуем в верхний регистр
+        # Это должно совпадать с логикой _normalize_group в handlers/schedule.py
+        return re.sub(r"\s+", "", name).upper()
 
     # ----- Наблюдатели -----
 

@@ -85,6 +85,58 @@ async def _find_group_schedule(
     current_week: Optional[int],
 ) -> Optional[tuple[str, ScheduleFile, str, str]]:
     target = _normalize_group(group_query)
+    
+    # Шаг 0: Проверяем кэш расположения группы (быстрая проверка)
+    cached_location = cache.get_group_location(group_query)
+    if cached_location:
+        file_url, sheet_name, actual_group_name = cached_location
+        # Находим файл в списке файлов
+        file_info = next((f for f in files if f.url == file_url), None)
+        if file_info:
+            logger.debug(
+                "Using cached group location group=%s file=%s sheet=%s",
+                group_query,
+                file_info.title,
+                sheet_name,
+            )
+            # Загружаем файл и извлекаем расписание
+            content = await _get_schedule_file_bytes(file_info)
+            if content is not None:
+                try:
+                    lessons = await extract_group_schedule(
+                        content,
+                        sheet_name=sheet_name,
+                        group_name=actual_group_name,
+                        day_filter=day,
+                        current_week=current_week,
+                    )
+                    if not lessons:
+                        lessons = await extract_group_schedule(
+                            content,
+                            sheet_name=sheet_name,
+                            group_name=actual_group_name,
+                            day_filter=day,
+                            current_week=None,
+                        )
+                    if lessons:
+                        formatted = format_lessons(lessons)
+                        logger.info(
+                            "Schedule found using cache group=%s sheet=%s file=%s",
+                            actual_group_name,
+                            sheet_name,
+                            file_info.title,
+                        )
+                        return formatted, file_info, sheet_name, actual_group_name
+                except Exception:
+                    logger.exception(
+                        "Failed to extract schedule from cached location group=%s file=%s sheet=%s",
+                        group_query,
+                        file_info.title,
+                        sheet_name,
+                    )
+                    # Продолжаем поиск в других файлах, если кэш не сработал
+    
+    # Шаг 1: Ищем группу во всех файлах (если кэш не сработал)
     for file_info in files:
         logger.debug(
             "Searching schedule in file title=%s url=%s target=%s",
@@ -178,6 +230,13 @@ async def _find_group_schedule(
             target_group_name,
             target_sheet,
             file_info.title,
+        )
+        # Сохраняем расположение группы в кэш для быстрого доступа в будущем
+        cache.set_group_location(
+            group_query,
+            file_info.url,
+            target_sheet,
+            target_group_name,
         )
         return formatted, file_info, target_sheet, target_group_name
     
