@@ -8,7 +8,14 @@ from schedule_bot.services.storage import Storage
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-cache = ScheduleCache(ttl_minutes=120, storage_dir=BASE_DIR / "schedule_data")
+# Настройки кэша оптимизированы для сервера с ограниченной памятью
+# TTL уменьшен до 60 минут для экономии памяти
+# Максимальный размер кэша в памяти: 50 МБ (можно уменьшить до 20-30 МБ при необходимости)
+cache = ScheduleCache(
+    ttl_minutes=60,
+    storage_dir=BASE_DIR / "schedule_data",
+    max_cache_size_mb=50.0,
+)
 fetcher = ScheduleFetcher()
 storage = Storage(BASE_DIR / "schedule.db")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -29,18 +30,28 @@ class LessonBlock:
     details: list[str]
 
 
-def list_sheets(data: bytes) -> List[str]:
+def _list_sheets_sync(data: bytes) -> List[str]:
     workbook = pd.ExcelFile(BytesIO(data))
     return workbook.sheet_names
 
 
-def list_groups(data: bytes, sheet_name: str) -> List[str]:
-    df = _load_sheet(data, sheet_name)
+async def list_sheets(data: bytes) -> List[str]:
+    """Асинхронная обертка для получения списка листов."""
+    return await asyncio.to_thread(_list_sheets_sync, data)
+
+
+def _list_groups_sync(data: bytes, sheet_name: str) -> List[str]:
+    df = _load_sheet_sync(data, sheet_name)
     excluded = {DAY_COLUMN, TIME_COLUMN}
     return [column for column in df.columns if column not in excluded]
 
 
-def extract_group_schedule(
+async def list_groups(data: bytes, sheet_name: str) -> List[str]:
+    """Асинхронная обертка для получения списка групп."""
+    return await asyncio.to_thread(_list_groups_sync, data, sheet_name)
+
+
+def _extract_group_schedule_sync(
     data: bytes,
     *,
     sheet_name: str,
@@ -48,7 +59,7 @@ def extract_group_schedule(
     day_filter: Optional[str] = None,
     current_week: Optional[int] = None,
 ) -> List[Lesson]:
-    df = _load_sheet(data, sheet_name)
+    df = _load_sheet_sync(data, sheet_name)
     if group_name not in df.columns:
         available = ", ".join(df.columns)
         logger.error(
@@ -103,7 +114,26 @@ def extract_group_schedule(
     return lessons
 
 
-def process_workbook(data: bytes) -> bytes:
+async def extract_group_schedule(
+    data: bytes,
+    *,
+    sheet_name: str,
+    group_name: str,
+    day_filter: Optional[str] = None,
+    current_week: Optional[int] = None,
+) -> List[Lesson]:
+    """Асинхронная обертка для извлечения расписания группы."""
+    return await asyncio.to_thread(
+        _extract_group_schedule_sync,
+        data,
+        sheet_name=sheet_name,
+        group_name=group_name,
+        day_filter=day_filter,
+        current_week=current_week,
+    )
+
+
+def _process_workbook_sync(data: bytes) -> bytes:
     """Возвращает копию книги без объединённых ячеек."""
     workbook = load_workbook(BytesIO(data))
     changed = False
@@ -135,7 +165,12 @@ def process_workbook(data: bytes) -> bytes:
     return output.read()
 
 
-def _load_sheet(data: bytes, sheet_name: str) -> pd.DataFrame:
+async def process_workbook(data: bytes) -> bytes:
+    """Асинхронная обертка для обработки книги Excel."""
+    return await asyncio.to_thread(_process_workbook_sync, data)
+
+
+def _load_sheet_sync(data: bytes, sheet_name: str) -> pd.DataFrame:
     df = pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=6)
     df = df.rename(columns=_cleanup_column_name)
     columns = [
@@ -151,6 +186,11 @@ def _load_sheet(data: bytes, sheet_name: str) -> pd.DataFrame:
         len(df),
     )
     return df
+
+
+def _load_sheet(data: bytes, sheet_name: str) -> pd.DataFrame:
+    """Синхронная версия для обратной совместимости."""
+    return _load_sheet_sync(data, sheet_name)
 
 
 def _normalize_schedule(df: pd.DataFrame) -> pd.DataFrame:

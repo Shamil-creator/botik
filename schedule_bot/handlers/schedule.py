@@ -92,57 +92,95 @@ async def _find_group_schedule(
             file_info.url,
             target,
         )
-        content = await _get_schedule_file_bytes(file_info)
-        if content is None:
-            logger.warning("Failed to get content for file %s", file_info.url)
-            continue
-        try:
-            sheets = list_sheets(content)
-        except Exception:
-            logger.exception(
-                "Failed to list sheets for file title=%s url=%s",
-                file_info.title,
-                file_info.url,
-            )
-            continue
-        for sheet in sheets:
+        
+        # Шаг 1: Получаем или загружаем метаданные (листы -> группы)
+        metadata = cache.get_file_metadata(file_info.url)
+        content = None
+        
+        if metadata is None:
+            # Метаданных нет, загружаем файл и извлекаем их
+            content = await _get_schedule_file_bytes(file_info)
+            if content is None:
+                logger.warning("Failed to get content for file %s", file_info.url)
+                continue
+            
             try:
-                groups = list_groups(content, sheet)
+                sheets = await list_sheets(content)
             except Exception:
                 logger.exception(
-                    "Failed to list groups for sheet=%s file=%s",
-                    sheet,
+                    "Failed to list sheets for file title=%s url=%s",
+                    file_info.title,
                     file_info.url,
                 )
                 continue
+            
+            # Извлекаем группы для каждого листа и кэшируем метаданные
+            metadata = {}
+            for sheet in sheets:
+                try:
+                    groups = await list_groups(content, sheet)
+                    metadata[sheet] = groups
+                except Exception:
+                    logger.exception(
+                        "Failed to list groups for sheet=%s file=%s",
+                        sheet,
+                        file_info.url,
+                    )
+                    continue
+            
+            if metadata:
+                cache.set_file_metadata(file_info.url, metadata)
+        
+        # Шаг 2: Ищем группу в метаданных
+        target_sheet = None
+        target_group_name = None
+        
+        for sheet, groups in metadata.items():
             group_name = _match_group(groups, target)
-            if not group_name:
+            if group_name:
+                target_sheet = sheet
+                target_group_name = group_name
+                break
+        
+        if not target_group_name:
+            logger.debug("Group not found in file %s", file_info.url)
+            continue
+        
+        # Шаг 3: Группа найдена, загружаем файл если еще не загружен
+        if content is None:
+            content = await _get_schedule_file_bytes(file_info)
+            if content is None:
+                logger.warning("Failed to get content for file %s", file_info.url)
                 continue
-            lessons = extract_group_schedule(
+        
+        # Шаг 4: Извлекаем расписание
+        lessons = await extract_group_schedule(
+            content,
+            sheet_name=target_sheet,
+            group_name=target_group_name,
+            day_filter=day,
+            current_week=current_week,
+        )
+        if not lessons:
+            lessons = await extract_group_schedule(
                 content,
-                sheet_name=sheet,
-                group_name=group_name,
+                sheet_name=target_sheet,
+                group_name=target_group_name,
                 day_filter=day,
-                current_week=current_week,
+                current_week=None,
             )
-            if not lessons:
-                lessons = extract_group_schedule(
-                    content,
-                    sheet_name=sheet,
-                    group_name=group_name,
-                    day_filter=day,
-                    current_week=None,
-                )
-            if not lessons:
-                continue
-            formatted = format_lessons(lessons)
-            logger.info(
-                "Schedule found group=%s sheet=%s file=%s",
-                group_name,
-                sheet,
-                file_info.title,
-            )
-            return formatted, file_info, sheet, group_name
+        if not lessons:
+            continue
+        
+        formatted = format_lessons(lessons)
+        logger.info(
+            "Schedule found group=%s sheet=%s file=%s",
+            target_group_name,
+            target_sheet,
+            file_info.title,
+        )
+        return formatted, file_info, target_sheet, target_group_name
+    
     return None
 
 
@@ -262,27 +300,58 @@ def _strip_day_heading(schedule_text: str) -> str:
 
 
 async def _get_schedule_file_bytes(file_info: ScheduleFile) -> Optional[bytes]:
+    # Проверяем кэш в памяти
     cached = cache.get_file_content(file_info.url)
     if cached is not None:
         logger.debug("Using in-memory cached file %s", file_info.url)
         return cached
 
-    stored = cache.load_file_from_disk(file_info.url)
+    # Проверяем кэш на диске (асинхронно)
+    stored = await cache.load_file_from_disk_async(file_info.url)
     if stored is not None:
         cache.set_file_content(file_info.url, stored, persist=False)
         logger.debug("Loaded file from disk cache %s", file_info.url)
         return stored
 
+    # Скачиваем и обрабатываем файл
     try:
         raw = await fetcher.download(file_info)
-    except httpx.HTTPError:
-        logger.exception("Download failed for %s", file_info.url)
+    except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
+        # Временные ошибки подключения
+        logger.warning(
+            "Failed to download file %s: %s (using cached data if available)",
+            file_info.url,
+            type(e).__name__,
+        )
+        return None
+    except httpx.HTTPError as e:
+        # Другие HTTP ошибки
+        logger.error(
+            "HTTP error while downloading file %s: %s",
+            file_info.url,
+            e,
+        )
+        return None
+    except Exception as e:
+        # Неожиданные ошибки
+        logger.exception(
+            "Unexpected error while downloading file %s",
+            file_info.url,
+        )
         return None
 
-    processed = process_workbook(raw)
-    cache.set_file_content(file_info.url, processed)
-    logger.debug("Processed and cached file %s", file_info.url)
-    return processed
+    # Обрабатываем файл асинхронно
+    try:
+        processed = await process_workbook(raw)
+        await cache.set_file_content_async(file_info.url, processed)
+        logger.debug("Processed and cached file %s", file_info.url)
+        return processed
+    except Exception as e:
+        logger.exception(
+            "Failed to process file %s",
+            file_info.url,
+        )
+        return None
 
 
 async def _ensure_schedule_files(
@@ -294,9 +363,43 @@ async def _ensure_schedule_files(
         try:
             schedule_files = await fetcher.list_schedule_files()
             cache.update_file_list(schedule_files)
-        except httpx.HTTPError as error:
-            await message.answer(f"Не удалось получить список файлов: {error}")
-            logger.exception("Fetching schedule file list failed")
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
+            # Временные ошибки подключения - используем кэшированные данные или сообщаем об ошибке
+            if not preview_only:
+                await message.answer(
+                    "⚠️ Не удалось подключиться к серверу. "
+                    "Попробуйте позже или используйте кэшированные данные."
+                )
+            logger.warning(
+                "Failed to fetch schedule file list: %s (will use cached data if available)",
+                type(e).__name__,
+            )
+            # Возвращаем None, чтобы использовать кэшированные данные
+            return None
+        except httpx.HTTPError as e:
+            # Другие HTTP ошибки
+            if not preview_only:
+                await message.answer(
+                    f"⚠️ Ошибка при получении списка файлов: {e}. "
+                    "Попробуйте позже."
+                )
+            logger.error(
+                "HTTP error while fetching schedule file list: %s",
+                e,
+                exc_info=True,
+            )
+            return None
+        except Exception as e:
+            # Неожиданные ошибки
+            if not preview_only:
+                await message.answer(
+                    "⚠️ Произошла неожиданная ошибка. "
+                    "Попробуйте позже."
+                )
+            logger.exception(
+                "Unexpected error while fetching schedule file list: %s",
+                type(e).__name__,
+            )
             return None
 
     if not schedule_files:

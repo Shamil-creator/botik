@@ -45,4 +45,6 @@ def get_week_by_number(number: int) -> Optional[WeekInfo]:
 
 def format_week_info(info: WeekInfo) -> str:
     number, start, end = info
-    return f"Неделя {number} ({start.strftime('%d.%m')}–{end.strftime('%d.%m')})"
+    start_str = start.strftime('%d.%m')
+    end_str = end.strftime('%d.%m')
+    return f"Неделя {number} ({start_str}–{end_str})"

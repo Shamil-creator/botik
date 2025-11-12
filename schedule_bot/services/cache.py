@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
+
+import aiofiles
 
 from schedule_bot.services.fetcher import ScheduleFile
 
@@ -13,7 +16,12 @@ logger = logging.getLogger(__name__)
 class ScheduleCache:
     """Простой кэш для расписаний в памяти."""
 
-    def __init__(self, ttl_minutes: int = 30, storage_dir: Path | None = None):
+    def __init__(
+        self,
+        ttl_minutes: int = 30,
+        storage_dir: Path | None = None,
+        max_cache_size_mb: float = 50.0,
+    ):
         self._ttl = timedelta(minutes=ttl_minutes)
         self._file_list_cache: Optional[Tuple[datetime, list[ScheduleFile]]] = None
         self._file_list_signature: Optional[Tuple[Tuple[str, str], ...]] = None
@@ -22,6 +30,12 @@ class ScheduleCache:
         base_dir = storage_dir or Path(__file__).resolve().parents[2] / 'schedule_data'
         base_dir.mkdir(parents=True, exist_ok=True)
         self._storage_dir = base_dir
+        # Кэш метаданных (листы и группы для каждого файла)
+        self._file_metadata_cache: Dict[str, Tuple[datetime, Dict[str, List[str]]]] = {}
+        self._metadata_ttl = timedelta(minutes=ttl_minutes * 2)  # Метаданные кэшируются дольше
+        # Ограничение на размер кэша в памяти (в байтах)
+        self._max_cache_size = int(max_cache_size_mb * 1024 * 1024)
+        self._current_cache_size = 0
 
     # ----- Работа со списком файлов -----
 
@@ -32,6 +46,14 @@ class ScheduleCache:
         cached_time, files = self._file_list_cache
         if datetime.now() - cached_time > self._ttl:
             return None
+        return files
+
+    def get_file_list_stale(self) -> Optional[list[ScheduleFile]]:
+        """Возвращает закэшированный список файлов, даже если он устарел.
+        Используется при ошибках подключения для работы с кэшированными данными."""
+        if self._file_list_cache is None:
+            return None
+        _, files = self._file_list_cache
         return files
 
     def update_file_list(self, files: list[ScheduleFile]) -> bool:
@@ -59,6 +81,7 @@ class ScheduleCache:
         return self._storage_dir / f"{self._hash_url(file_url)}.xlsx"
 
     def load_file_from_disk(self, file_url: str) -> Optional[bytes]:
+        """Синхронная версия для обратной совместимости."""
         path = self._file_path(file_url)
         if not path.exists():
             logger.debug("Cache miss on disk for %s", file_url)
@@ -69,10 +92,33 @@ class ScheduleCache:
             logger.exception("Failed to read cached file %s", path)
             return None
 
+    async def load_file_from_disk_async(self, file_url: str) -> Optional[bytes]:
+        """Асинхронная версия для чтения файла с диска."""
+        path = self._file_path(file_url)
+        if not path.exists():
+            logger.debug("Cache miss on disk for %s", file_url)
+            return None
+        try:
+            async with aiofiles.open(path, 'rb') as f:
+                return await f.read()
+        except OSError:
+            logger.exception("Failed to read cached file %s", path)
+            return None
+
     def _persist_file(self, file_url: str, content: bytes) -> None:
+        """Синхронная версия для обратной совместимости."""
         path = self._file_path(file_url)
         try:
             path.write_bytes(content)
+        except OSError:
+            logger.exception("Failed to persist cache file %s", path)
+
+    async def _persist_file_async(self, file_url: str, content: bytes) -> None:
+        """Асинхронная версия для записи файла на диск."""
+        path = self._file_path(file_url)
+        try:
+            async with aiofiles.open(path, 'wb') as f:
+                await f.write(content)
         except OSError:
             logger.exception("Failed to persist cache file %s", path)
 
@@ -84,9 +130,16 @@ class ScheduleCache:
                     file_path.unlink()
                 except OSError:
                     pass
+        # Очищаем кэш содержимого файлов
         for url in list(self._file_content_cache.keys()):
             if url not in active_urls:
-                self._file_content_cache.pop(url, None)
+                _, content = self._file_content_cache.pop(url, (None, b""))
+                if content:
+                    self._current_cache_size -= len(content)
+        # Очищаем кэш метаданных
+        for url in list(self._file_metadata_cache.keys()):
+            if url not in active_urls:
+                self._file_metadata_cache.pop(url, None)
 
     # ----- Работа с содержимым файлов -----
 
@@ -96,16 +149,98 @@ class ScheduleCache:
         cached_time, content = self._file_content_cache[file_url]
         if datetime.now() - cached_time > self._ttl:
             del self._file_content_cache[file_url]
+            self._current_cache_size -= len(content)
             return None
         return content
 
+    def _evict_oldest_if_needed(self) -> None:
+        """Удаляет старые файлы из кэша, если превышен лимит размера."""
+        if self._current_cache_size <= self._max_cache_size:
+            return
+        
+        # Сортируем файлы по времени кэширования (старые первыми)
+        sorted_items = sorted(
+            self._file_content_cache.items(),
+            key=lambda x: x[1][0]  # Сортировка по времени (datetime)
+        )
+        
+        # Удаляем самые старые файлы, пока не уложимся в лимит
+        while self._current_cache_size > self._max_cache_size and sorted_items:
+            url, (_, content) = sorted_items.pop(0)
+            del self._file_content_cache[url]
+            self._current_cache_size -= len(content)
+            logger.debug(
+                "Evicted file from cache url=%s size=%d current_size=%d max_size=%d",
+                url,
+                len(content),
+                self._current_cache_size,
+                self._max_cache_size,
+            )
+
     def set_file_content(self, file_url: str, content: bytes, *, persist: bool = True) -> None:
+        """Синхронная версия для обратной совместимости."""
+        # Удаляем старый файл из кэша, если он там был
+        if file_url in self._file_content_cache:
+            old_content = self._file_content_cache[file_url][1]
+            self._current_cache_size -= len(old_content)
+        
+        # Добавляем новый файл
         self._file_content_cache[file_url] = (datetime.now(), content)
+        self._current_cache_size += len(content)
+        
+        # Проверяем лимит и удаляем старые файлы при необходимости
+        self._evict_oldest_if_needed()
+        
         if persist:
             self._persist_file(file_url, content)
         logger.debug(
-            "In-memory cache updated for %s persist=%s", file_url, persist
+            "In-memory cache updated for %s persist=%s size=%d current_total=%d",
+            file_url,
+            persist,
+            len(content),
+            self._current_cache_size,
         )
+
+    async def set_file_content_async(self, file_url: str, content: bytes, *, persist: bool = True) -> None:
+        """Асинхронная версия для кэширования содержимого файла."""
+        # Удаляем старый файл из кэша, если он там был
+        if file_url in self._file_content_cache:
+            old_content = self._file_content_cache[file_url][1]
+            self._current_cache_size -= len(old_content)
+        
+        # Добавляем новый файл
+        self._file_content_cache[file_url] = (datetime.now(), content)
+        self._current_cache_size += len(content)
+        
+        # Проверяем лимит и удаляем старые файлы при необходимости
+        self._evict_oldest_if_needed()
+        
+        if persist:
+            await self._persist_file_async(file_url, content)
+        logger.debug(
+            "In-memory cache updated for %s persist=%s size=%d current_total=%d",
+            file_url,
+            persist,
+            len(content),
+            self._current_cache_size,
+        )
+
+    # ----- Кэширование метаданных (листы и группы) -----
+
+    def get_file_metadata(self, file_url: str) -> Optional[Dict[str, List[str]]]:
+        """Возвращает закэшированные метаданные файла (листы -> группы)."""
+        if file_url not in self._file_metadata_cache:
+            return None
+        cached_time, metadata = self._file_metadata_cache[file_url]
+        if datetime.now() - cached_time > self._metadata_ttl:
+            del self._file_metadata_cache[file_url]
+            return None
+        return metadata
+
+    def set_file_metadata(self, file_url: str, metadata: Dict[str, List[str]]) -> None:
+        """Сохраняет метаданные файла (листы -> группы)."""
+        self._file_metadata_cache[file_url] = (datetime.now(), metadata)
+        logger.debug("Metadata cached for %s sheets=%d", file_url, len(metadata))
 
     # ----- Наблюдатели -----
 
