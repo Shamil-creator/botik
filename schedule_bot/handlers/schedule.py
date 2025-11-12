@@ -362,17 +362,31 @@ async def _get_schedule_file_bytes(file_info: ScheduleFile) -> Optional[bytes]:
     # Проверяем кэш в памяти
     cached = cache.get_file_content(file_info.url)
     if cached is not None:
-        logger.debug("Using in-memory cached file %s", file_info.url)
+        logger.info(
+            "✓ Using in-memory cached file title=%s size=%d bytes",
+            file_info.title,
+            len(cached),
+        )
         return cached
 
     # Проверяем кэш на диске (асинхронно)
     stored = await cache.load_file_from_disk_async(file_info.url)
     if stored is not None:
+        # Восстанавливаем файл в кэш памяти для быстрого доступа
         cache.set_file_content(file_info.url, stored, persist=False)
-        logger.debug("Loaded file from disk cache %s", file_info.url)
+        logger.info(
+            "✓ Loaded file from disk cache title=%s size=%d bytes",
+            file_info.title,
+            len(stored),
+        )
         return stored
 
-    # Скачиваем и обрабатываем файл
+    # Файл не найден в кэшах, скачиваем с сайта
+    logger.warning(
+        "⚠ File not in cache, downloading from website title=%s url=%s",
+        file_info.title,
+        file_info.url,
+    )
     try:
         raw = await fetcher.download(file_info)
     except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
@@ -403,7 +417,11 @@ async def _get_schedule_file_bytes(file_info: ScheduleFile) -> Optional[bytes]:
     try:
         processed = await process_workbook(raw)
         await cache.set_file_content_async(file_info.url, processed)
-        logger.debug("Processed and cached file %s", file_info.url)
+        logger.info(
+            "✓ Downloaded, processed and cached file title=%s size=%d bytes",
+            file_info.title,
+            len(processed),
+        )
         return processed
     except Exception as e:
         logger.exception(
@@ -417,49 +435,77 @@ async def _ensure_schedule_files(
     message: Message,
     preview_only: bool,
 ) -> Optional[list[ScheduleFile]]:
+    # Сначала проверяем актуальный кэш
     schedule_files = cache.get_file_list()
-    if schedule_files is None:
-        try:
-            schedule_files = await fetcher.list_schedule_files()
-            cache.update_file_list(schedule_files)
-        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
-            # Временные ошибки подключения - используем кэшированные данные или сообщаем об ошибке
-            if not preview_only:
-                await message.answer(
-                    "⚠️ Не удалось подключиться к серверу. "
-                    "Попробуйте позже или используйте кэшированные данные."
-                )
-            logger.warning(
-                "Failed to fetch schedule file list: %s (will use cached data if available)",
-                type(e).__name__,
+    if schedule_files is not None:
+        logger.debug(
+            "Using cached file list (count=%d files)",
+            len(schedule_files),
+        )
+        return schedule_files
+    
+    # Кэш истек, но проверяем устаревший кэш перед запросом на сайт
+    # Это позволяет избежать лишних запросов на сайт при каждом обращении
+    stale_files = cache.get_file_list_stale()
+    if stale_files:
+        logger.info(
+            "File list cache expired, using stale cache to avoid website request (count=%d files). "
+            "Background monitor will update it later.",
+            len(stale_files),
+        )
+        # Обновляем время кэша, чтобы использовать устаревший кэш
+        # Это позволит избежать запроса на сайт при каждом обращении
+        cache.update_file_list(stale_files)
+        return stale_files
+    
+    # Нет даже устаревшего кэша, запрашиваем с сайта
+    logger.warning(
+        "⚠ File list not in cache, fetching from website (this may cause delay)"
+    )
+    try:
+        schedule_files = await fetcher.list_schedule_files()
+        cache.update_file_list(schedule_files)
+        logger.info(
+            "✓ Fetched file list from website (count=%d files)",
+            len(schedule_files),
+        )
+    except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
+        # Временные ошибки подключения
+        if not preview_only:
+            await message.answer(
+                "⚠️ Не удалось подключиться к серверу. "
+                "Попробуйте позже или используйте кэшированные данные."
             )
-            # Возвращаем None, чтобы использовать кэшированные данные
-            return None
-        except httpx.HTTPError as e:
-            # Другие HTTP ошибки
-            if not preview_only:
-                await message.answer(
-                    f"⚠️ Ошибка при получении списка файлов: {e}. "
-                    "Попробуйте позже."
-                )
-            logger.error(
-                "HTTP error while fetching schedule file list: %s",
-                e,
-                exc_info=True,
+        logger.warning(
+            "Failed to fetch schedule file list: %s (will use cached data if available)",
+            type(e).__name__,
+        )
+        return None
+    except httpx.HTTPError as e:
+        # Другие HTTP ошибки
+        if not preview_only:
+            await message.answer(
+                f"⚠️ Ошибка при получении списка файлов: {e}. "
+                "Попробуйте позже."
             )
-            return None
-        except Exception as e:
-            # Неожиданные ошибки
-            if not preview_only:
-                await message.answer(
-                    "⚠️ Произошла неожиданная ошибка. "
-                    "Попробуйте позже."
-                )
-            logger.exception(
-                "Unexpected error while fetching schedule file list: %s",
-                type(e).__name__,
+        logger.error(
+            "HTTP error while fetching schedule file list: %s",
+            e,
+            exc_info=True,
+        )
+        return None
+    except Exception as e:
+        # Неожиданные ошибки
+        if not preview_only:
+            await message.answer(
+                "⚠️ Произошла неожиданная ошибка. "
+                "Попробуйте позже."
             )
-            return None
+        logger.exception(
+            "Unexpected error while fetching schedule file list: %s",
+            type(e).__name__,
+        )
+        return None
 
     if not schedule_files:
         if not preview_only:

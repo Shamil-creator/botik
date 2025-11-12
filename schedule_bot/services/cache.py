@@ -21,8 +21,12 @@ class ScheduleCache:
         ttl_minutes: int = 30,
         storage_dir: Path | None = None,
         max_cache_size_mb: float = 50.0,
+        file_list_ttl_minutes: int | None = None,
     ):
         self._ttl = timedelta(minutes=ttl_minutes)
+        # TTL для списка файлов (по умолчанию в 4 раза больше, так как список меняется реже)
+        file_list_ttl = file_list_ttl_minutes or (ttl_minutes * 4)
+        self._file_list_ttl = timedelta(minutes=file_list_ttl)
         self._file_list_cache: Optional[Tuple[datetime, list[ScheduleFile]]] = None
         self._file_list_signature: Optional[Tuple[Tuple[str, str], ...]] = None
         self._file_content_cache: Dict[str, Tuple[datetime, bytes]] = {}
@@ -48,7 +52,8 @@ class ScheduleCache:
         if self._file_list_cache is None:
             return None
         cached_time, files = self._file_list_cache
-        if datetime.now() - cached_time > self._ttl:
+        # Используем отдельный TTL для списка файлов (он меняется реже)
+        if datetime.now() - cached_time > self._file_list_ttl:
             return None
         return files
 
