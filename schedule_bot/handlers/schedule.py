@@ -26,6 +26,15 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
+def _format_user_info(message: Message) -> str:
+    """Форматирует информацию о пользователе для логов: chat_id и username (если есть)."""
+    chat_id = message.chat.id
+    username = message.from_user.username if message.from_user else None
+    if username:
+        return f"chat_id={chat_id} @{username}"
+    return f"chat_id={chat_id}"
+
+
 @router.message(Command("schedule"))
 async def handle_schedule(message: Message, command: CommandObject) -> None:
     args = (command.args or "").strip()
@@ -34,8 +43,8 @@ async def handle_schedule(message: Message, command: CommandObject) -> None:
         group_query = tokens[0]
         day_query = " ".join(tokens[1:]) if len(tokens) > 1 else None
         logger.info(
-            "Schedule request with args chat_id=%s group_query=%s day_query=%s",
-            message.chat.id,
+            "Schedule request with args %s group_query=%s day_query=%s",
+            _format_user_info(message),
             group_query,
             day_query,
         )
@@ -46,13 +55,13 @@ async def handle_schedule(message: Message, command: CommandObject) -> None:
                 "Укажи группу: /schedule <группа> [день] или сначала "
                 "настрой группу через /start"
             )
-            logger.info("Schedule request without group chat_id=%s", message.chat.id)
+            logger.info("Schedule request without group %s", _format_user_info(message))
             return
         group_query = stored_group
         day_query = None
         logger.info(
-            "Schedule request using stored group chat_id=%s group=%s",
-            message.chat.id,
+            "Schedule request using stored group %s group=%s",
+            _format_user_info(message),
             group_query,
         )
 
@@ -63,12 +72,12 @@ async def handle_schedule(message: Message, command: CommandObject) -> None:
             "ср, пятница."
         )
         logger.warning(
-            "Failed to parse day chat_id=%s input=%s", message.chat.id, day_query
+            "Failed to parse day %s input=%s", _format_user_info(message), day_query
         )
         return
 
     cache.add_watcher(message.chat.id)
-    logger.debug("Watcher added chat_id=%s", message.chat.id)
+    logger.debug("Watcher added %s", _format_user_info(message))
 
     await send_schedule_for_group(
         message,
@@ -276,8 +285,8 @@ async def send_schedule_for_group(
                 "Проверь код или попробуй позже."
             )
         logger.warning(
-            "Schedule not found chat_id=%s group=%s day=%s",
-            message.chat.id,
+            "Schedule not found %s group=%s day=%s",
+            _format_user_info(message),
             group_query,
             day,
         )
@@ -304,8 +313,8 @@ async def send_schedule_for_group(
         reply_markup=reply_markup,
     )
     logger.info(
-        "Schedule sent chat_id=%s group=%s day=%s",
-        message.chat.id,
+        "Schedule sent %s group=%s day=%s",
+        _format_user_info(message),
         group_name,
         day,
     )

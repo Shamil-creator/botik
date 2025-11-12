@@ -28,6 +28,15 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
+def _format_user_info(message: Message) -> str:
+    """Форматирует информацию о пользователе для логов: chat_id и username (если есть)."""
+    chat_id = message.chat.id
+    username = message.from_user.username if message.from_user else None
+    if username:
+        return f"chat_id={chat_id} @{username}"
+    return f"chat_id={chat_id}"
+
+
 class RegistrationState(StatesGroup):
     waiting_group = State()
 
@@ -39,8 +48,8 @@ async def handle_start(message: Message, state: FSMContext) -> None:
     if stored_group:
         cache.add_watcher(message.chat.id)
         logger.info(
-            "/start called with existing group chat_id=%s group=%s",
-            message.chat.id,
+            "/start called with existing group %s group=%s",
+            _format_user_info(message),
             stored_group,
         )
         await state.clear()
@@ -62,13 +71,13 @@ async def handle_start(message: Message, state: FSMContext) -> None:
         )
         return
 
-    logger.info("/start registration initiated chat_id=%s", message.chat.id)
+    logger.info("/start registration initiated %s", _format_user_info(message))
     await _prompt_for_group(message, state)
 
 
 @router.message(Command("change_group"))
 async def handle_change_group(message: Message, state: FSMContext) -> None:
-    logger.info("Change group command chat_id=%s", message.chat.id)
+    logger.info("Change group command %s", _format_user_info(message))
     await _prompt_for_group(message, state)
 
 
@@ -76,7 +85,7 @@ async def handle_change_group(message: Message, state: FSMContext) -> None:
 async def handle_change_group_button(
     message: Message, state: FSMContext
 ) -> None:
-    logger.info("Change group button chat_id=%s", message.chat.id)
+    logger.info("Change group button %s", _format_user_info(message))
     await _prompt_for_group(message, state)
 
 
@@ -85,7 +94,7 @@ async def handle_group_input(message: Message, state: FSMContext) -> None:
     group_query = (message.text or "").strip()
     if not group_query:
         await message.answer("Введи, пожалуйста, код группы.")
-        logger.warning("Empty group input chat_id=%s", message.chat.id)
+        logger.warning("Empty group input %s", _format_user_info(message))
         return
 
     validation_result = await send_schedule_for_group(
@@ -102,8 +111,8 @@ async def handle_group_input(message: Message, state: FSMContext) -> None:
             "Не нашёл такую группу. Проверь код и попробуй ещё раз."
         )
         logger.warning(
-            "Group validation failed chat_id=%s input=%s",
-            message.chat.id,
+            "Group validation failed %s input=%s",
+            _format_user_info(message),
             group_query,
         )
         return
@@ -112,7 +121,7 @@ async def handle_group_input(message: Message, state: FSMContext) -> None:
     storage.set_user_group(message.chat.id, group_name)
     cache.add_watcher(message.chat.id)
     logger.info(
-        "Group stored chat_id=%s group=%s", message.chat.id, group_name
+        "Group stored %s group=%s", _format_user_info(message), group_name
     )
 
     await state.clear()
@@ -135,7 +144,7 @@ async def handle_session_button(message: Message) -> None:
             reply_markup=ReplyKeyboardRemove(),
         )
         logger.warning(
-            "Session button without group chat_id=%s", message.chat.id
+            "Session button without group %s", _format_user_info(message)
         )
         return
 
@@ -149,8 +158,8 @@ async def handle_session_button(message: Message) -> None:
             reply_markup=build_main_keyboard(),
         )
         logger.warning(
-            "Session data missing chat_id=%s group=%s",
-            message.chat.id,
+            "Session data missing %s group=%s",
+            _format_user_info(message),
             group_name,
         )
         return
@@ -158,7 +167,7 @@ async def handle_session_button(message: Message) -> None:
     message_text = format_session_message(group_name, session)
     await message.answer(message_text, reply_markup=build_main_keyboard())
     logger.info(
-        "Session data sent chat_id=%s group=%s", message.chat.id, group_name
+        "Session data sent %s group=%s", _format_user_info(message), group_name
     )
 
 
@@ -171,7 +180,7 @@ async def handle_schedule_button(message: Message) -> None:
             reply_markup=ReplyKeyboardRemove(),
         )
         logger.warning(
-            "Schedule button without group chat_id=%s", message.chat.id
+            "Schedule button without group %s", _format_user_info(message)
         )
         return
 
@@ -186,8 +195,8 @@ async def handle_schedule_button(message: Message) -> None:
         reply_markup=build_schedule_keyboard(),
     )
     logger.debug(
-        "Schedule keyboard shown chat_id=%s group=%s",
-        message.chat.id,
+        "Schedule keyboard shown %s group=%s",
+        _format_user_info(message),
         group_name,
     )
 
@@ -198,7 +207,7 @@ async def handle_back_button(message: Message) -> None:
         "Вернулся в главное меню.",
         reply_markup=build_main_keyboard(),
     )
-    logger.debug("Back to main menu chat_id=%s", message.chat.id)
+    logger.debug("Back to main menu %s", _format_user_info(message))
 
 
 @router.message(F.text.in_(DAY_BUTTONS))
@@ -210,7 +219,7 @@ async def handle_day_selection(message: Message) -> None:
             reply_markup=ReplyKeyboardRemove(),
         )
         logger.warning(
-            "Day selection without group chat_id=%s", message.chat.id
+            "Day selection without group %s", _format_user_info(message)
         )
         return
 
@@ -220,7 +229,7 @@ async def handle_day_selection(message: Message) -> None:
             "Вернулся в главное меню.",
             reply_markup=build_main_keyboard(),
         )
-        logger.debug("Back button pressed in day selection chat_id=%s", message.chat.id)
+        logger.debug("Back button pressed in day selection %s", _format_user_info(message))
         return
 
     day = None if day_text == "Вся неделя" else day_text
@@ -239,8 +248,8 @@ async def handle_day_selection(message: Message) -> None:
             reply_markup=build_main_keyboard(),
         )
         logger.error(
-            "Failed to send schedule from day selection chat_id=%s group=%s day=%s",
-            message.chat.id,
+            "Failed to send schedule from day selection %s group=%s day=%s",
+            _format_user_info(message),
             group_name,
             day,
         )
@@ -255,4 +264,4 @@ async def _prompt_for_group(message: Message, state: FSMContext) -> None:
         ),
         reply_markup=ReplyKeyboardRemove(),
     )
-    logger.debug("Prompted for group chat_id=%s", message.chat.id)
+    logger.debug("Prompted for group %s", _format_user_info(message))
