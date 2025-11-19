@@ -11,6 +11,7 @@ load_dotenv()
 @dataclass(frozen=True)
 class BotConfig:
     token: str
+    admin_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -42,8 +43,10 @@ def load_settings() -> Settings:
     bot_token = _get_env("BOT_TOKEN")
     log_level = os.getenv("LOG_LEVEL", "INFO")
     include_library_logs = os.getenv("LOG_INCLUDE_LIBS", "0") in {"1", "true", "TRUE"}
+    admin_id_str = os.getenv("ADMIN_ID")
+    admin_id = int(admin_id_str) if admin_id_str and admin_id_str.isdigit() else None
     return Settings(
-        bot=BotConfig(token=bot_token),
+        bot=BotConfig(token=bot_token, admin_id=admin_id),
         fetcher=FetcherConfig(),
         logging=LoggingConfig(
             level=log_level,

@@ -4,8 +4,9 @@ import logging
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +34,24 @@ class Storage:
 
     def _init_db(self) -> None:
         with self._connect() as conn:
+            # Миграция: добавляем поля created_at и last_activity если их нет
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
+            except sqlite3.OperationalError:
+                pass  # Поле уже существует
+            
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN last_activity TEXT")
+            except sqlite3.OperationalError:
+                pass  # Поле уже существует
+            
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     chat_id INTEGER PRIMARY KEY,
-                    group_name TEXT NOT NULL
+                    group_name TEXT NOT NULL,
+                    created_at TEXT,
+                    last_activity TEXT
                 )
                 """
             )
@@ -61,14 +75,44 @@ class Storage:
         return normalized.upper()
 
     def set_user_group(self, chat_id: int, group_name: str) -> None:
+        now = datetime.now().isoformat()
         with self._connect() as conn:
-            query = (
-                "INSERT OR REPLACE INTO "
-                "users(chat_id, group_name) "
-                "VALUES(?, ?)"
-            )
-            conn.execute(query, (chat_id, group_name))
+            # Проверяем, существует ли пользователь
+            existing = conn.execute(
+                "SELECT created_at FROM users WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+            
+            if existing:
+                # Обновляем существующего пользователя (сохраняем created_at если он есть)
+                created_at = existing[0] if existing[0] else now
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET group_name = ?, last_activity = ?, created_at = ?
+                    WHERE chat_id = ?
+                    """,
+                    (group_name, now, created_at, chat_id),
+                )
+            else:
+                # Создаём нового пользователя
+                conn.execute(
+                    """
+                    INSERT INTO users(chat_id, group_name, created_at, last_activity)
+                    VALUES(?, ?, ?, ?)
+                    """,
+                    (chat_id, group_name, now, now),
+                )
         logger.info("User group saved chat_id=%s group=%s", chat_id, group_name)
+    
+    def update_user_activity(self, chat_id: int) -> None:
+        """Обновляет время последней активности пользователя."""
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE users SET last_activity = ? WHERE chat_id = ?",
+                (now, chat_id),
+            )
 
     def get_user_group(self, chat_id: int) -> Optional[str]:
         with self._connect() as conn:
@@ -155,3 +199,63 @@ class Storage:
             return None
         logger.debug("Session retrieved group=%s", group_name)
         return SessionData(*row)
+    
+    # ----- Методы статистики -----
+    
+    def get_total_users(self) -> int:
+        """Возвращает общее количество зарегистрированных пользователей."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM users").fetchone()
+        return row[0] if row else 0
+    
+    def get_group_statistics(self, limit: int = 10) -> list[Tuple[str, int]]:
+        """
+        Возвращает список групп с количеством пользователей.
+        Сортируется по убыванию количества пользователей.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT group_name, COUNT(*) as count
+                FROM users
+                GROUP BY group_name
+                ORDER BY count DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+    
+    def get_new_users_count(self, days: int = 7) -> int:
+        """Возвращает количество новых пользователей за последние N дней."""
+        cutoff_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff_date = cutoff_date - timedelta(days=days)
+        cutoff_str = cutoff_date.isoformat()
+        
+        with self._connect() as conn:
+            # Считаем только пользователей с датой регистрации >= cutoff_date
+            # Если created_at NULL (старые пользователи), не учитываем их
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM users
+                WHERE created_at >= ?
+                """,
+                (cutoff_str,),
+            ).fetchone()
+        return row[0] if row else 0
+    
+    def get_active_users_count(self, days: int = 7) -> int:
+        """Возвращает количество активных пользователей за последние N дней."""
+        cutoff_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff_date = cutoff_date - timedelta(days=days)
+        cutoff_str = cutoff_date.isoformat()
+        
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(DISTINCT chat_id) FROM users
+                WHERE last_activity >= ?
+                """,
+                (cutoff_str,),
+            ).fetchone()
+        return row[0] if row else 0

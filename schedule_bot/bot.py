@@ -6,8 +6,9 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
 from schedule_bot.config import load_settings
-from schedule_bot.handlers import schedule, start
+from schedule_bot.handlers import admin, schedule, start
 from schedule_bot.logging_config import setup_logging
+from schedule_bot.middleware.activity import ActivityMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +37,13 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode="HTML"),
     )
     dispatcher = Dispatcher()
+    
+    # Регистрируем middleware для отслеживания активности
+    dispatcher.message.middleware(ActivityMiddleware())
 
     dispatcher.include_router(start.router)
     dispatcher.include_router(schedule.router)
+    dispatcher.include_router(admin.router)
 
     try:
         ensure_sessions_loaded(storage)
