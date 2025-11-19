@@ -45,13 +45,19 @@ class Storage:
             except sqlite3.OperationalError:
                 pass  # Поле уже существует
             
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
+            except sqlite3.OperationalError:
+                pass  # Поле уже существует
+            
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     chat_id INTEGER PRIMARY KEY,
                     group_name TEXT NOT NULL,
                     created_at TEXT,
-                    last_activity TEXT
+                    last_activity TEXT,
+                    username TEXT
                 )
                 """
             )
@@ -74,7 +80,7 @@ class Storage:
         normalized = re.sub(r"\s+", "", name or "")
         return normalized.upper()
 
-    def set_user_group(self, chat_id: int, group_name: str) -> None:
+    def set_user_group(self, chat_id: int, group_name: str, username: Optional[str] = None) -> None:
         now = datetime.now().isoformat()
         with self._connect() as conn:
             # Проверяем, существует ли пользователь
@@ -89,30 +95,36 @@ class Storage:
                 conn.execute(
                     """
                     UPDATE users
-                    SET group_name = ?, last_activity = ?, created_at = ?
+                    SET group_name = ?, last_activity = ?, created_at = ?, username = ?
                     WHERE chat_id = ?
                     """,
-                    (group_name, now, created_at, chat_id),
+                    (group_name, now, created_at, username, chat_id),
                 )
             else:
                 # Создаём нового пользователя
                 conn.execute(
                     """
-                    INSERT INTO users(chat_id, group_name, created_at, last_activity)
-                    VALUES(?, ?, ?, ?)
+                    INSERT INTO users(chat_id, group_name, created_at, last_activity, username)
+                    VALUES(?, ?, ?, ?, ?)
                     """,
-                    (chat_id, group_name, now, now),
+                    (chat_id, group_name, now, now, username),
                 )
-        logger.info("User group saved chat_id=%s group=%s", chat_id, group_name)
+        logger.info("User group saved chat_id=%s group=%s username=%s", chat_id, group_name, username)
     
-    def update_user_activity(self, chat_id: int) -> None:
-        """Обновляет время последней активности пользователя."""
+    def update_user_activity(self, chat_id: int, username: Optional[str] = None) -> None:
+        """Обновляет время последней активности пользователя и username (если указан)."""
         now = datetime.now().isoformat()
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE users SET last_activity = ? WHERE chat_id = ?",
-                (now, chat_id),
-            )
+            if username is not None:
+                conn.execute(
+                    "UPDATE users SET last_activity = ?, username = ? WHERE chat_id = ?",
+                    (now, username, chat_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE users SET last_activity = ? WHERE chat_id = ?",
+                    (now, chat_id),
+                )
 
     def get_user_group(self, chat_id: int) -> Optional[str]:
         with self._connect() as conn:
@@ -259,3 +271,16 @@ class Storage:
                 (cutoff_str,),
             ).fetchone()
         return row[0] if row else 0
+    
+    def get_users_by_group(self, group_name: str) -> list[Tuple[int, Optional[str]]]:
+        """
+        Возвращает список (chat_id, username) пользователей указанной группы.
+        Группа нормализуется перед поиском.
+        """
+        normalized = self._normalize_group(group_name)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT chat_id, username FROM users WHERE group_name = ? ORDER BY chat_id",
+                (normalized,),
+            ).fetchall()
+        return [(row[0], row[1]) for row in rows]

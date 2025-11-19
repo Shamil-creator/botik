@@ -4,6 +4,7 @@ import logging
 
 from aiogram import Router
 from aiogram.filters import Command
+from aiogram.filters.command import CommandObject
 from aiogram.types import Message
 
 from schedule_bot.config import load_settings
@@ -62,11 +63,11 @@ def format_statistics() -> str:
 async def handle_admin(message: Message) -> None:
     """Команда /admin — показывает меню админ-панели."""
     if not is_admin(message.chat.id):
-        logger.warning(
-            "Admin command called by non-admin chat_id=%s",
+        # Игнорируем команду без ответа для не-админов
+        logger.debug(
+            "Admin command ignored (non-admin) chat_id=%s",
             message.chat.id,
         )
-        await message.answer("❌ У вас нет прав доступа к этой команде.")
         return
     
     logger.info("Admin command called chat_id=%s", message.chat.id)
@@ -74,6 +75,7 @@ async def handle_admin(message: Message) -> None:
         "<b>🔐 Админ-панель</b>\n\n"
         "Доступные команды:\n"
         "  • /stats — статистика бота\n"
+        "  • /users [группа] — список пользователей группы\n"
         "  • /admin — это меню",
     )
 
@@ -82,11 +84,11 @@ async def handle_admin(message: Message) -> None:
 async def handle_stats(message: Message) -> None:
     """Команда /stats — показывает подробную статистику."""
     if not is_admin(message.chat.id):
-        logger.warning(
-            "Stats command called by non-admin chat_id=%s",
+        # Игнорируем команду без ответа для не-админов
+        logger.debug(
+            "Stats command ignored (non-admin) chat_id=%s",
             message.chat.id,
         )
-        await message.answer("❌ У вас нет прав доступа к этой команде.")
         return
     
     logger.info("Stats command called chat_id=%s", message.chat.id)
@@ -98,4 +100,100 @@ async def handle_stats(message: Message) -> None:
         logger.exception("Failed to generate statistics")
         await message.answer(
             f"❌ Ошибка при получении статистики: {type(e).__name__}"
+        )
+
+
+@router.message(Command("users"))
+async def handle_users(message: Message, command: CommandObject) -> None:
+    """Команда /users [группа] — показывает список пользователей группы."""
+    if not is_admin(message.chat.id):
+        # Игнорируем команду без ответа для не-админов
+        logger.debug(
+            "Users command ignored (non-admin) chat_id=%s",
+            message.chat.id,
+        )
+        return
+    
+    group_query = (command.args or "").strip()
+    
+    if not group_query:
+        # Показываем список всех групп
+        group_stats = storage.get_group_statistics(limit=50)
+        if not group_stats:
+            await message.answer("❌ Нет зарегистрированных групп.")
+            return
+        
+        groups_text = "<b>📚 Список групп:</b>\n\n"
+        groups_text += "Используйте: <code>/users &lt;группа&gt;</code>\n\n"
+        groups_text += "<b>Доступные группы:</b>\n"
+        for idx, (group_name, count) in enumerate(group_stats, 1):
+            groups_text += f"  {idx}. <b>{group_name}</b> — {count} чел.\n"
+        
+        await message.answer(groups_text)
+        logger.info("Users command called without group chat_id=%s", message.chat.id)
+        return
+    
+    # Ищем пользователей указанной группы
+    try:
+        users = storage.get_users_by_group(group_query)  # Возвращает [(chat_id, username), ...]
+        
+        if not users:
+            await message.answer(
+                f"❌ Группа <b>{group_query}</b> не найдена или в ней нет пользователей."
+            )
+            logger.info(
+                "Users command: group not found chat_id=%s group=%s",
+                message.chat.id,
+                group_query,
+            )
+            return
+        
+        # Форматируем список пользователей
+        # Telegram ограничивает длину сообщения ~4096 символов
+        # Разбиваем на части если нужно
+        max_users_per_message = 40  # Уменьшено из-за username
+        total_users = len(users)
+        
+        if total_users <= max_users_per_message:
+            # Одно сообщение
+            users_text = f"<b>👥 Пользователи группы {group_query}</b>\n\n"
+            users_text += f"Всего: <b>{total_users}</b> чел.\n\n"
+            users_text += "<b>Пользователи:</b>\n"
+            for idx, (user_id, username) in enumerate(users, 1):
+                if username:
+                    users_text += f"  {idx}. @{username} (<code>{user_id}</code>)\n"
+                else:
+                    users_text += f"  {idx}. <code>{user_id}</code>\n"
+            
+            await message.answer(users_text)
+        else:
+            # Несколько сообщений
+            await message.answer(
+                f"<b>👥 Пользователи группы {group_query}</b>\n\n"
+                f"Всего: <b>{total_users}</b> чел.\n\n"
+                f"Список будет отправлен частями..."
+            )
+            
+            for i in range(0, total_users, max_users_per_message):
+                chunk = users[i:i + max_users_per_message]
+                chunk_text = f"<b>Часть {i // max_users_per_message + 1}</b>\n\n"
+                chunk_text += "<b>Пользователи:</b>\n"
+                for idx, (user_id, username) in enumerate(chunk, start=i + 1):
+                    if username:
+                        chunk_text += f"  {idx}. @{username} (<code>{user_id}</code>)\n"
+                    else:
+                        chunk_text += f"  {idx}. <code>{user_id}</code>\n"
+                
+                await message.answer(chunk_text)
+        
+        logger.info(
+            "Users command: group found chat_id=%s group=%s count=%d",
+            message.chat.id,
+            group_query,
+            total_users,
+        )
+    except Exception as e:
+        logger.exception("Failed to get users by group")
+        await message.answer(
+            f"❌ Ошибка при получении списка пользователей: {type(e).__name__}"
         )

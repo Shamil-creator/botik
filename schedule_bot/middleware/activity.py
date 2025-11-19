@@ -26,7 +26,11 @@ class ActivityMiddleware(BaseMiddleware):
             # Обновляем активность только для зарегистрированных пользователей
             if storage.get_user_group(chat_id) is not None:
                 try:
-                    storage.update_user_activity(chat_id)
+                    # Получаем username из сообщения если он есть
+                    username = None
+                    if event.from_user:
+                        username = event.from_user.username
+                    storage.update_user_activity(chat_id, username)
                 except Exception:
                     # Не прерываем обработку при ошибке обновления активности
                     logger.debug(

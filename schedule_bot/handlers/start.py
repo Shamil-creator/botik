@@ -118,7 +118,8 @@ async def handle_group_input(message: Message, state: FSMContext) -> None:
         return
 
     _, _, _, group_name = validation_result
-    storage.set_user_group(message.chat.id, group_name)
+    username = message.from_user.username if message.from_user else None
+    storage.set_user_group(message.chat.id, group_name, username)
     cache.add_watcher(message.chat.id)
     logger.info(
         "Group stored %s group=%s", _format_user_info(message), group_name
