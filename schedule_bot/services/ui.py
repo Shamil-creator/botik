@@ -6,6 +6,8 @@ from schedule_bot.services.formatter import DAY_ORDER
 
 MAIN_BUTTON_SCHEDULE = "Расписание"
 MAIN_BUTTON_SESSION = "Зимняя сессия"
+MAIN_BUTTON_CREDITS = "Зачеты"
+MAIN_BUTTON_EXAMS = "Экзамены"
 MAIN_BUTTON_CHANGE = "Сменить группу"
 BACK_BUTTON = "Назад"
 
@@ -17,7 +19,10 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=MAIN_BUTTON_SCHEDULE)],
-            [KeyboardButton(text=MAIN_BUTTON_SESSION)],
+            [
+                KeyboardButton(text=MAIN_BUTTON_CREDITS),
+                KeyboardButton(text=MAIN_BUTTON_EXAMS),
+            ],
             [KeyboardButton(text=MAIN_BUTTON_CHANGE)],
         ],
         resize_keyboard=True,

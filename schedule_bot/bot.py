@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
 from schedule_bot.config import load_settings
-from schedule_bot.handlers import admin, schedule, start
+from schedule_bot.handlers import admin, exams, schedule, start
 from schedule_bot.logging_config import setup_logging
 from schedule_bot.middleware.activity import ActivityMiddleware
 
@@ -19,7 +19,7 @@ async def main() -> None:
 
     logger.info("Starting bot initialisation")
 
-    from schedule_bot.services.deps import cache, storage  # noqa: WPS433
+    from schedule_bot.services.deps import cache, exams_storage, storage  # noqa: WPS433
     from schedule_bot.services.monitor import (  # noqa: WPS433
         monitor_updates,
     )
@@ -43,6 +43,7 @@ async def main() -> None:
 
     dispatcher.include_router(start.router)
     dispatcher.include_router(schedule.router)
+    dispatcher.include_router(exams.router)
     dispatcher.include_router(admin.router)
 
     try:
@@ -50,6 +51,13 @@ async def main() -> None:
     except Exception:
         logger.exception("Failed to load session documents")
         raise
+
+    try:
+        await exams_storage.load_all()
+        logger.info("Exams and credits schedules loaded")
+    except Exception:
+        logger.exception("Failed to load exams/credits schedules")
+        # Не прерываем запуск, если не удалось загрузить расписания
 
     monitor_task = asyncio.create_task(
         monitor_updates(bot, interval_minutes=60)
